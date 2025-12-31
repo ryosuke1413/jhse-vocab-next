@@ -2,147 +2,152 @@
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Vocab Trainer 1500</title>
-  <link rel="stylesheet" href="style.css" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>JHSE Vocab</title>
+  <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
-  <header class="header">
-    <div class="brand">
-      <div class="logo">VT</div>
-      <div class="titles">
-        <h1>Vocab Trainer 1500</h1>
-        <p class="sub">3難易度 ×（4択 / 打ち込み / ミックス）</p>
-      </div>
+  <header class="wrap header">
+    <div class="titleRow">
+      <h1>JHSE Vocab</h1>
+      <div class="rankChip" id="rankChip">RANK</div>
     </div>
 
-    <div class="status">
-      <div class="pill">
-        <span class="label">ランク</span>
-        <span id="rankText" class="value">1</span>
+    <section class="card rankPanel">
+      <div class="rankTop">
+        <div>
+          <div class="muted">現在ランク</div>
+          <div class="rankName" id="rankName">-</div>
+        </div>
+        <div class="rankRight">
+          <div class="muted">次のランクまで（累計正解）</div>
+          <div class="rankRemain" id="rankRemain">-</div>
+        </div>
       </div>
-      <div class="pill">
-        <span class="label">直近正答率</span>
-        <span id="accText" class="value">--%</span>
+
+      <div class="bar" aria-label="rank progress">
+        <div class="barFill" id="barFill" style="width:0%"></div>
       </div>
-      <button id="resetBtn" class="btn ghost" title="学習履歴を初期化">リセット</button>
-    </div>
+
+      <div class="rankHint">
+        <span class="pill" id="qTypePill">-</span>
+        <span class="pill" id="progress">0 / 10</span>
+      </div>
+    </section>
   </header>
 
-  <main class="main">
-    <section class="card" id="home">
-      <h2>出題を選択</h2>
+  <main class="wrap">
+    <!-- Setup -->
+    <section class="card" id="setup">
+      <div class="setupGrid">
+        <div class="field">
+          <label>ユーザ名</label>
+          <div class="userRow">
+            <input class="input" id="userName" maxlength="20" placeholder="例：ryosuke" />
+            <button class="btn" id="saveUserBtn">保存</button>
+          </div>
+        </div>
 
-      <div class="grid">
         <div class="field">
           <label>難易度</label>
-          <select id="levelSel">
-            <option value="1">Lv1（500語）</option>
-            <option value="2">Lv2（500語）</option>
-            <option value="3">Lv3（500語）</option>
-          </select>
-          <p class="hint">※ランクに連動して自動でおすすめ難易度を提示します</p>
+          <select id="level"></select>
         </div>
 
         <div class="field">
-          <label>方向</label>
-          <select id="dirSel">
-            <option value="ja2en">日本語 → 英語</option>
-            <option value="en2ja">英語 → 日本語</option>
+          <label>出題形式</label>
+          <select id="quizType">
+            <option value="mc">4択（10問）</option>
+            <option value="typing">打ち込み（10問）</option>
+            <option value="mix">ミックス（10問：形5 + 系5）</option>
           </select>
-          <p class="hint">4択・打ち込みで使用</p>
         </div>
 
         <div class="field">
-          <label>モード</label>
-          <select id="modeSel">
-            <option value="mc10">4択10問</option>
-            <option value="type10">打ち込み10問</option>
-            <option value="mix10">ミックス10問（動詞形×5 + 系列×5）</option>
+          <label>出題方向（4択 / 打ち込み）</label>
+          <select id="direction">
+            <option value="en_to_ja">英語 → 日本語</option>
+            <option value="ja_to_en">日本語 → 英語</option>
           </select>
-          <p class="hint">ミックスは方向固定：動詞形は形当て／系列は（日→英）</p>
+          <div class="muted small" id="directionHint">ミックスは固定（形問題は英語ベース／系問題は日→英）</div>
+        </div>
+
+        <div class="statCard">
+          <div class="statLabel">累計 回答数</div>
+          <div class="statValue" id="totalAns">0</div>
+        </div>
+        <div class="statCard">
+          <div class="statLabel">累計 正解数</div>
+          <div class="statValue" id="totalOk">0</div>
+        </div>
+        <div class="statCard">
+          <div class="statLabel">直近 正答率（50問）</div>
+          <div class="statValue" id="acc">0%</div>
+        </div>
+        <div class="statCard">
+          <div class="statLabel">ミス単語数</div>
+          <div class="statValue" id="missCnt">0</div>
+        </div>
+
+        <div class="actions">
+          <button class="btn primary" id="startBtn">スタート</button>
+          <button class="btn" id="reviewBtn">ミス復習</button>
+          <button class="btn danger" id="resetBtn">初期化</button>
         </div>
       </div>
-
-      <div class="actions">
-        <button id="startBtn" class="btn primary">開始</button>
-      </div>
-
-      <details class="note">
-        <summary>ランク昇降格ルール</summary>
-        <ul>
-          <li>直近 <b>50問</b> の正答率（ローリング）で判定</li>
-          <li><b>昇格</b>：直近正答率 ≥ <b>85%</b> かつ履歴が <b>30問</b> 以上</li>
-          <li><b>降格</b>：直近正答率 &lt; <b>70%</b>（履歴が <b>30問</b> 以上）</li>
-          <li>判定は「10問セット終了時」に行います</li>
-        </ul>
-      </details>
     </section>
 
+    <!-- Quiz -->
     <section class="card hidden" id="quiz">
       <div class="quizTop">
-        <div class="meta">
-          <div class="kpi"><span class="label">モード</span><span id="modeText" class="value">--</span></div>
-          <div class="kpi"><span class="label">難易度</span><span id="levelText" class="value">--</span></div>
-          <div class="kpi"><span class="label">進捗</span><span id="progText" class="value">1 / 10</span></div>
-        </div>
-        <button id="quitBtn" class="btn ghost">中断</button>
+        <div class="qText" id="qText">-</div>
+        <div class="muted small" id="typeMeaning"></div>
       </div>
 
-      <div class="prompt">
-        <div id="promptMain" class="promptMain">--</div>
-        <div id="promptSub" class="promptSub"> </div>
+      <div id="choices" class="choices"></div>
+
+      <div id="typing" class="typing hidden">
+        <div class="typeRow">
+          <input id="typeInput" class="input" autocomplete="off" autocapitalize="none" spellcheck="false" inputmode="latin" placeholder="ここに入力" />
+          <button id="checkBtn" class="btn primary">提出</button>
+        </div>
+        <div class="typeExample muted small" id="typeExample"></div>
       </div>
 
-      <div id="mcArea" class="mcArea hidden"></div>
+      <div class="feedback" id="feedback"></div>
 
-      <form id="typeArea" class="typeArea hidden" autocomplete="off">
-        <input id="typeInput" class="typeInput" type="text"
-               inputmode="latin" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-               placeholder="答えを入力して Enter" />
-        <button class="btn primary" type="submit">決定</button>
-      </form>
-
-      <div id="feedback" class="feedback hidden"></div>
-
-      <div class="bottomBar">
-        <div class="score">
-          <span>スコア</span>
-          <b id="scoreText">0</b>
-        </div>
-        <button id="nextBtn" class="btn primary hidden">次へ</button>
+      <div class="quizActions">
+        <button class="btn" id="backBtn">設定に戻る</button>
+        <button class="btn" id="quitBtn">中断</button>
+        <button class="btn primary" id="nextBtn">次へ</button>
       </div>
     </section>
 
+    <!-- Result -->
     <section class="card hidden" id="result">
-      <h2>結果</h2>
-      <div class="resultGrid">
-        <div class="resultBox">
-          <div class="big" id="resultScore">0 / 10</div>
-          <div class="small" id="resultAcc">正答率 --%</div>
-        </div>
-        <div class="resultBox">
-          <div class="big" id="rankAfter">ランク --</div>
-          <div class="small" id="rankNote">--</div>
-        </div>
+      <div class="resultTop">
+        <div class="resultTitle">結果</div>
+        <div class="resultText" id="resultText">-</div>
       </div>
 
-      <div class="review">
-        <h3>復習</h3>
-        <div id="reviewList" class="reviewList"></div>
+      <div class="missPanel">
+        <div class="missHead">
+          <div class="missTitle">今回ミスした単語</div>
+          <button class="btn" id="retryMissBtn">ミスだけもう一度</button>
+        </div>
+        <div class="missList" id="missList"></div>
       </div>
 
       <div class="actions">
-        <button id="backHomeBtn" class="btn">トップへ</button>
-        <button id="retryBtn" class="btn primary">もう一度</button>
+        <button class="btn primary" id="startBtn2">もう一度（同条件）</button>
+        <button class="btn" id="backBtn2">設定に戻る</button>
       </div>
     </section>
   </main>
 
-  <footer class="footer">
-    <span>words.json: 1500 words</span>
+  <footer class="wrap footer muted small">
+    ローカル保存（LocalStorage）を使用します。GitHub Pagesでそのまま動作します。
   </footer>
 
-  <script src="app.js"></script>
+  <script src="./app.js"></script>
 </body>
 </html>
