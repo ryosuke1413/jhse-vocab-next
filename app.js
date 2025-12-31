@@ -1,585 +1,754 @@
-/* Vocab Trainer 1500
- * - words.json: [{en,ja,level,series,forms?}]
- * - Modes:
- *   mc10: 4-choice x10 (ja2en / en2ja)
- *   type10: typing x10 (ja2en / en2ja)
- *   mix10: 10 questions = verb-form(5) + series(5)
- *      - verb-form: choose which form (base/past/pp)
- *      - series: show series + Japanese, choose English (4 choices)
- * - Rank: rolling accuracy over last 50 answers
+/* JHSE Vocab - GitHub Pages Single Page App
+ * - words.json: [{ en, ja, level(1-3), series, forms?: {base,past,pp} }]
+ * - Quiz types:
+ *   1) mc (4択10問) : direction en->ja / ja->en
+ *   2) typing (打ち込み10問) : direction en->ja / ja->en
+ *   3) mix (形5 + 系5 =10問)
+ *      - 形問題: 動詞の forms を使い、提示された形が「現在/過去/過去分詞」のどれか（4択）
+ *        ※ 形が同一（cut/cut/cut 等）の場合、該当する複数の答えを全て正解扱い
+ *      - 系問題: 「【series】 ja は英語で？」（打ち込み） 5問
  */
 
 const $ = (id) => document.getElementById(id);
 
-const STORAGE_KEY = "vt1500_state_v1";
-const ROLLING_N = 50;
-const MIN_HISTORY_FOR_RANK = 30;
-const PROMOTE_ACC = 0.85;
-const DEMOTE_ACC = 0.70;
+const els = {
+  setup: $("setup"),
+  quiz: $("quiz"),
+  result: $("result"),
 
-const state = {
-  words: [],
-  byLevel: {1:[],2:[],3:[]},
-  byLevelSeries: {1:new Map(),2:new Map(),3:new Map()},
-  verbCandidates: {1:[],2:[],3:[]},
-  ui: {},
-  session: null,
-  profile: loadProfile(),
+  userName: $("userName"),
+  saveUserBtn: $("saveUserBtn"),
+
+  level: $("level"),
+  quizType: $("quizType"),
+  direction: $("direction"),
+  directionHint: $("directionHint"),
+
+  startBtn: $("startBtn"),
+  startBtn2: $("startBtn2"),
+  backBtn: $("backBtn"),
+  backBtn2: $("backBtn2"),
+  reviewBtn: $("reviewBtn"),
+  resetBtn: $("resetBtn"),
+
+  rankChip: $("rankChip"),
+  rankName: $("rankName"),
+  rankRemain: $("rankRemain"),
+  barFill: $("barFill"),
+
+  totalOk: $("totalOk"),
+  totalAns: $("totalAns"),
+  acc: $("acc"),
+  missCnt: $("missCnt"),
+
+  qTypePill: $("qTypePill"),
+  progress: $("progress"),
+  qText: $("qText"),
+  choices: $("choices"),
+  typing: $("typing"),
+  typeInput: $("typeInput"),
+  checkBtn: $("checkBtn"),
+  typeMeaning: $("typeMeaning"),
+  typeExample: $("typeExample"),
+  feedback: $("feedback"),
+  nextBtn: $("nextBtn"),
+  quitBtn: $("quitBtn"),
+
+  resultText: $("resultText"),
+  missList: $("missList"),
+  retryMissBtn: $("retryMissBtn"),
 };
 
-function loadProfile(){
+const STORAGE_KEY = "jhse_vocab_v3";
+
+// ---- Rank rules (緩和 + 正答率で昇降格) ----
+const RANKS = [
+  { key: "beginner",  name: "ビギナー",     needOk: 0,    css: "rank-beginner" },
+  { key: "iron",      name: "アイロン",     needOk: 30,   css: "rank-iron" },
+  { key: "bronze",    name: "ブロンズ",     needOk: 90,   css: "rank-bronze" },
+  { key: "silver",    name: "シルバー",     needOk: 180,  css: "rank-silver" },
+  { key: "gold",      name: "ゴールド",     needOk: 320,  css: "rank-gold" },
+  { key: "platinum",  name: "プラチナ",     needOk: 520,  css: "rank-platinum" },
+  { key: "diamond",   name: "ダイヤモンド", needOk: 780,  css: "rank-diamond" },
+  { key: "master",    name: "マスター",     needOk: 1100, css: "rank-master" }
+];
+
+// 正答率（直近50問）に応じてランクを±1調整
+function accuracyDelta(acc01){
+  if (acc01 >= 0.88) return +1;
+  if (acc01 <= 0.60) return -1;
+  return 0;
+}
+
+// ---- State ----
+let WORDS = [];
+let state = null;
+
+function defaultState(){
+  return {
+    userName: "",
+    totalAns: 0,
+    totalOk: 0,
+    // recent: 直近の正誤（最大50）
+    recent: [],
+    // miss: { "en||ja": {en,ja,level,series,forms?, misses:number} }
+    miss: {},
+    // lastConfig: setup画面の前回選択
+    lastConfig: { level: 1, quizType: "mc", direction: "en_to_ja" },
+  };
+}
+
+function loadState(){
   try{
     const raw = localStorage.getItem(STORAGE_KEY);
-    if(!raw) return { rank: 1, rolling: [] }; // rolling: boolean[] newest last
-    const p = JSON.parse(raw);
-    if(!p || typeof p.rank !== "number" || !Array.isArray(p.rolling)) throw 0;
-    p.rank = Math.min(3, Math.max(1, p.rank|0));
-    p.rolling = p.rolling.map(Boolean).slice(-ROLLING_N);
-    return p;
+    if(!raw) return defaultState();
+    const s = JSON.parse(raw);
+    const d = defaultState();
+    return { ...d, ...s, lastConfig: { ...d.lastConfig, ...(s.lastConfig||{}) } };
   }catch{
-    return { rank: 1, rolling: [] };
+    return defaultState();
   }
 }
-function saveProfile(){
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state.profile));
-}
-function resetProfile(){
-  localStorage.removeItem(STORAGE_KEY);
-  state.profile = { rank: 1, rolling: [] };
-  refreshHeader();
+
+function saveState(){
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 }
 
-function rollingAccuracy(){
-  const arr = state.profile.rolling;
-  if(arr.length === 0) return null;
-  const ok = arr.filter(Boolean).length;
-  return ok / arr.length;
+function screen(name){
+  for(const k of ["setup","quiz","result"]){
+    els[k].classList.toggle("hidden", k !== name);
+  }
 }
 
-function refreshHeader(){
-  $("rankText").textContent = String(state.profile.rank);
-  const acc = rollingAccuracy();
-  $("accText").textContent = acc === null ? "--%" : Math.round(acc*100) + "%";
-  // おすすめ難易度：ランクに合わせる
-  const suggested = String(state.profile.rank);
-  $("levelSel").value = suggested;
-}
+function clamp(n,min,max){ return Math.max(min, Math.min(max,n)); }
 
-function normalize(s){
-  return String(s ?? "").trim().toLowerCase();
-}
 function shuffle(arr){
-  for(let i=arr.length-1;i>0;i--){
-    const j=Math.floor(Math.random()*(i+1));
-    [arr[i],arr[j]]=[arr[j],arr[i]];
+  const a = arr.slice();
+  for(let i=a.length-1;i>0;i--){
+    const j = Math.floor(Math.random()*(i+1));
+    [a[i],a[j]]=[a[j],a[i]];
   }
-  return arr;
-}
-function sample(arr){
-  return arr[Math.floor(Math.random()*arr.length)];
-}
-function uniqBy(arr, keyFn){
-  const seen = new Set();
-  const out = [];
-  for(const x of arr){
-    const k = keyFn(x);
-    if(seen.has(k)) continue;
-    seen.add(k);
-    out.push(x);
-  }
-  return out;
+  return a;
 }
 
+function keyOfWord(w){ return `${w.en}||${w.ja}`; }
+
+function norm(s){
+  return String(s||"")
+    .trim()
+    .replace(/\s+/g," ")
+    .toLowerCase();
+}
+
+// ---- Rank UI ----
+function computeRecentAcc(){
+  const r = state.recent || [];
+  if(r.length === 0) return 0;
+  const ok = r.reduce((a,b)=>a+(b?1:0),0);
+  return ok / r.length;
+}
+
+function baseRankIndexByOk(totalOk){
+  let idx = 0;
+  for(let i=0;i<RANKS.length;i++){
+    if(totalOk >= RANKS[i].needOk) idx = i;
+  }
+  return idx;
+}
+
+function effectiveRankIndex(){
+  const base = baseRankIndexByOk(state.totalOk);
+  const acc = computeRecentAcc();
+  const delta = accuracyDelta(acc);
+  return clamp(base + delta, 0, RANKS.length-1);
+}
+
+function updateRankUI(){
+  const eff = effectiveRankIndex();
+  const base = baseRankIndexByOk(state.totalOk);
+  const acc = computeRecentAcc();
+
+  const r = RANKS[eff];
+  els.rankName.textContent = r.name;
+
+  // 次まで（累計正解）: effectiveではなく base に基づく次閾値を表示
+  const next = RANKS[Math.min(base+1, RANKS.length-1)];
+  const remain = Math.max(0, next.needOk - state.totalOk);
+  els.rankRemain.textContent = (base === RANKS.length-1) ? "MAX" : `${remain}`;
+
+  // Progress bar: baseランクの区間に対する進捗
+  const curNeed = RANKS[base].needOk;
+  const nextNeed = next.needOk;
+  const pct = (base === RANKS.length-1) ? 100 :
+    ( (state.totalOk - curNeed) / Math.max(1,(nextNeed - curNeed)) ) * 100;
+  els.barFill.style.width = `${clamp(pct,0,100)}%`;
+
+  // Chip style
+  els.rankChip.className = `rankChip ${r.css}`;
+  els.rankChip.textContent = r.name;
+
+  // Stats
+  els.totalAns.textContent = String(state.totalAns);
+  els.totalOk.textContent = String(state.totalOk);
+  els.acc.textContent = `${Math.round(acc*100)}%`;
+  els.missCnt.textContent = String(Object.keys(state.miss||{}).length);
+}
+
+// ---- words.json ----
 async function loadWords(){
-  const res = await fetch("words.json", {cache:"no-cache"});
+  const res = await fetch("./words.json", { cache: "no-store" });
   if(!res.ok) throw new Error("words.json を読み込めませんでした");
-  const words = await res.json();
-  if(!Array.isArray(words)) throw new Error("words.json の形式が不正です（配列ではありません）");
+  const data = await res.json();
 
-  // validate minimal
-  const cleaned = [];
-  for(const w of words){
-    if(!w || typeof w.en !== "string" || typeof w.ja !== "string") continue;
-    const level = Number(w.level);
-    if(!(level===1||level===2||level===3)) continue;
-    const series = typeof w.series === "string" ? w.series : "名詞/その他";
-    const entry = { en: w.en, ja: w.ja, level, series };
-    if(w.forms && typeof w.forms.base==="string" && typeof w.forms.past==="string" && typeof w.forms.pp==="string"){
-      entry.forms = { base: w.forms.base, past: w.forms.past, pp: w.forms.pp };
-    }
-    cleaned.push(entry);
-  }
-
-  // enforce 500 each? Not required, but expected.
-  state.words = cleaned;
-  state.byLevel = {1:[],2:[],3:[]};
-  state.byLevelSeries = {1:new Map(),2:new Map(),3:new Map()};
-  state.verbCandidates = {1:[],2:[],3:[]};
-
-  for(const w of cleaned){
-    state.byLevel[w.level].push(w);
-
-    // series map
-    const map = state.byLevelSeries[w.level];
-    if(!map.has(w.series)) map.set(w.series, []);
-    map.get(w.series).push(w);
-
-    if(w.forms) state.verbCandidates[w.level].push(w);
-  }
-
-  // final sanity: 500 each recommended
-  refreshHeader();
-}
-
-function show(id){
-  $("home").classList.add("hidden");
-  $("quiz").classList.add("hidden");
-  $("result").classList.add("hidden");
-  $(id).classList.remove("hidden");
-}
-
-function setQuizMeta(){
-  const s = state.session;
-  $("modeText").textContent = s.mode;
-  $("levelText").textContent = "Lv" + s.level;
-  $("progText").textContent = `${s.index+1} / ${s.total}`;
-  $("scoreText").textContent = String(s.correct);
-}
-
-function setPrompt(main, sub=""){
-  $("promptMain").textContent = main;
-  $("promptSub").textContent = sub || " ";
-}
-
-function clearInteraction(){
-  $("mcArea").innerHTML = "";
-  $("mcArea").classList.add("hidden");
-  $("typeArea").classList.add("hidden");
-  $("feedback").classList.add("hidden");
-  $("nextBtn").classList.add("hidden");
-  $("typeInput").value = "";
-  $("typeInput").disabled = false;
-}
-
-function showFeedback(isCorrect, big, small){
-  const fb = $("feedback");
-  fb.classList.remove("hidden","good","bad");
-  fb.classList.add(isCorrect ? "good" : "bad");
-  fb.innerHTML = `<div class="big">${escapeHtml(big)}</div><div class="small">${escapeHtml(small)}</div>`;
-}
-
-function escapeHtml(s){
-  return String(s).replace(/[&<>"']/g, (m)=>({
-    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
-  }[m]));
-}
-
-function renderChoices(options, correctIndex, onPick){
-  const area = $("mcArea");
-  area.classList.remove("hidden");
-  area.innerHTML = "";
-  options.forEach((opt, i)=>{
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "choice";
-    btn.textContent = opt;
-    btn.onclick = ()=>{
-      // lock
-      [...area.querySelectorAll("button")].forEach(b=>b.disabled=true);
-      btn.classList.add(i===correctIndex ? "correct":"wrong");
-      // also mark correct
-      if(i!==correctIndex){
-        area.querySelectorAll("button")[correctIndex].classList.add("correct");
+  // allow either flat list or legacy {levels:[{level,words:[]}]}
+  let list = [];
+  if(Array.isArray(data)){
+    list = data;
+  }else if(data && Array.isArray(data.levels)){
+    for(const lv of data.levels){
+      for(const w of (lv.words||[])){
+        list.push({
+          en: w.en,
+          ja: w.ja,
+          level: lv.level ?? w.level ?? 1,
+          series: w.series || "その他",
+          ...(w.forms ? { forms: w.forms } : {}),
+        });
       }
-      onPick(i===correctIndex, opt);
-    };
-    area.appendChild(btn);
-  });
-}
-
-function pushRolling(isCorrect){
-  state.profile.rolling.push(Boolean(isCorrect));
-  if(state.profile.rolling.length > ROLLING_N){
-    state.profile.rolling = state.profile.rolling.slice(-ROLLING_N);
-  }
-  saveProfile();
-  refreshHeader();
-}
-
-function applyRankRule(){
-  const acc = rollingAccuracy();
-  const n = state.profile.rolling.length;
-  if(acc === null || n < MIN_HISTORY_FOR_RANK){
-    return { changed:false, note:`履歴 ${n}問（判定は${MIN_HISTORY_FOR_RANK}問以上）` };
-  }
-
-  const before = state.profile.rank;
-  let after = before;
-
-  if(acc >= PROMOTE_ACC) after = Math.min(3, before + 1);
-  else if(acc < DEMOTE_ACC) after = Math.max(1, before - 1);
-
-  state.profile.rank = after;
-  saveProfile();
-  refreshHeader();
-
-  if(after > before) return { changed:true, note:`正答率 ${Math.round(acc*100)}% で昇格` };
-  if(after < before) return { changed:true, note:`正答率 ${Math.round(acc*100)}% で降格` };
-  return { changed:false, note:`正答率 ${Math.round(acc*100)}%（維持）` };
-}
-
-function startSession(){
-  const level = Number($("levelSel").value);
-  const dir = $("dirSel").value; // ja2en / en2ja
-  const mode = $("modeSel").value; // mc10/type10/mix10
-
-  // session plan
-  const total = 10;
-  const plan = [];
-
-  if(mode === "mix10"){
-    // 5 verb-form + 5 series(ja->en)
-    for(let i=0;i<5;i++) plan.push({kind:"verbForm"});
-    for(let i=0;i<5;i++) plan.push({kind:"seriesJa2En"});
-    shuffle(plan);
+    }
   }else{
-    for(let i=0;i<10;i++) plan.push({kind: mode==="mc10" ? "mc" : "type"});
+    throw new Error("words.json の形式が不正です");
   }
 
-  state.session = {
-    level, dir, mode,
-    total,
-    index: 0,
-    correct: 0,
-    plan,
-    history: [], // {q, correct, yourAnswer, correctAnswer}
-    current: null,
+  // sanitize
+  list = list
+    .filter(w=>w && w.en && w.ja)
+    .map(w=>({
+      en: String(w.en),
+      ja: String(w.ja),
+      level: Number(w.level)||1,
+      series: String(w.series||"その他"),
+      ...(w.forms ? { forms: w.forms } : {}),
+    }));
+
+  // ensure 1..3
+  list.forEach(w=>{ w.level = clamp(w.level,1,3); });
+
+  return list;
+}
+
+// ---- Question generator ----
+function pickWordsByLevel(level){
+  return WORDS.filter(w=>w.level === level);
+}
+
+function buildQuestionPool(config, useMissOnly=false){
+  const { level, quizType, direction } = config;
+
+  if(useMissOnly){
+    const missList = Object.values(state.miss||{});
+    const pool = missList.filter(w=>w.level === level);
+    return pool.length ? pool : missList;
+  }
+
+  if(quizType === "mix"){
+    // mix ignores direction here, but still filtered by level
+    return pickWordsByLevel(level);
+  }
+
+  return pickWordsByLevel(level);
+}
+
+function choiceQuestion(word, dir, pool){
+  const askEnToJa = (dir === "en_to_ja");
+  const prompt = askEnToJa ? `英単語：${word.en}` : `日本語：${word.ja}`;
+  const correct = askEnToJa ? word.ja : word.en;
+
+  // distractors: same direction answer field
+  const field = askEnToJa ? "ja" : "en";
+  const candidates = shuffle(pool.filter(w=>keyOfWord(w)!==keyOfWord(word))).slice(0,3);
+  const options = shuffle([correct, ...candidates.map(w=>w[field])]);
+
+  return {
+    kind: "mc",
+    prompt,
+    options,
+    correctSet: new Set([norm(correct)]),
+    meta: { word, dir }
   };
-
-  show("quiz");
-  nextQuestion();
 }
 
-function pickWord(level){
-  const list = state.byLevel[level];
-  return sample(list);
+function typingQuestion(word, dir){
+  const askEnToJa = (dir === "en_to_ja");
+  const prompt = askEnToJa ? `英単語：${word.en}` : `日本語：${word.ja}`;
+  const correct = askEnToJa ? word.ja : word.en;
+
+  return {
+    kind: "typing",
+    prompt,
+    correctSet: new Set([norm(correct)]),
+    showMeaning: askEnToJa ? "" : `意味：${word.ja}`,
+    example: askEnToJa ? `例）${word.ja}` : `例）${word.en}`,
+    meta: { word, dir }
+  };
 }
 
-function pickDistractors(level, correctWord, count, field){ // field: "en" or "ja"
-  const list = state.byLevel[level];
-  const used = new Set([normalize(correctWord[field])]);
-  const out = [];
-  let guard = 0;
-  while(out.length < count && guard++ < 2000){
-    const w = sample(list);
-    const v = normalize(w[field]);
-    if(!v || used.has(v)) continue;
-    used.add(v);
-    out.push(w[field]);
-  }
-  return out;
-}
+function mixFormQuestion(pool){
+  // pick a verb with forms
+  const verbs = pool.filter(w=>w.forms && w.forms.base && w.forms.past && w.forms.pp);
+  const word = verbs[Math.floor(Math.random()*verbs.length)];
 
-function makeMCQuestion(level, dir){
-  const w = pickWord(level);
-  if(dir==="ja2en"){
-    const correct = w.en;
-    const wrongs = pickDistractors(level, w, 3, "en");
-    const options = shuffle([correct, ...wrongs]);
-    return {
-      kind:"mc",
-      promptMain: w.ja,
-      promptSub: "日本語 → 英語（4択）",
-      options,
-      correctIndex: options.indexOf(correct),
-      correctAnswer: correct,
-      meta: { en:w.en, ja:w.ja, series:w.series }
-    };
-  }else{
-    const correct = w.ja;
-    const wrongs = pickDistractors(level, w, 3, "ja");
-    const options = shuffle([correct, ...wrongs]);
-    return {
-      kind:"mc",
-      promptMain: w.en,
-      promptSub: "英語 → 日本語（4択）",
-      options,
-      correctIndex: options.indexOf(correct),
-      correctAnswer: correct,
-      meta: { en:w.en, ja:w.ja, series:w.series }
-    };
-  }
-}
-
-function makeTypeQuestion(level, dir){
-  const w = pickWord(level);
-  if(dir==="ja2en"){
-    return {
-      kind:"type",
-      promptMain: w.ja,
-      promptSub: "日本語 → 英語（打ち込み）",
-      correctAnswer: w.en,
-      meta: { en:w.en, ja:w.ja, series:w.series }
-    };
-  }else{
-    return {
-      kind:"type",
-      promptMain: w.en,
-      promptSub: "英語 → 日本語（打ち込み）",
-      correctAnswer: w.ja,
-      meta: { en:w.en, ja:w.ja, series:w.series }
-    };
-  }
-}
-
-function makeVerbFormQuestion(level){
-  const candidates = state.verbCandidates[level];
-  if(candidates.length < 10){
-    // fallback: if too few verbs, downgrade to normal MC ja2en
-    return makeMCQuestion(level, "ja2en");
-  }
-  const w = sample(candidates);
+  // pick which form to show (base/past/pp)
+  const forms = word.forms;
   const keys = ["base","past","pp"];
-  const key = sample(keys);
-  const shown = w.forms[key];
-  const labels = { base:"現在形", past:"過去形", pp:"過去分詞" };
-  const options = shuffle(keys.map(k=>labels[k]));
-  const correctLabel = labels[key];
+  const showKey = keys[Math.floor(Math.random()*keys.length)];
+  const shown = String(forms[showKey]);
+
+  // Determine correct labels. If multiple forms equal shown, accept all matching.
+  const correctKeys = keys.filter(k => norm(forms[k]) === norm(shown));
+  const labelOf = (k)=>{
+    if(k==="base") return "現在形";
+    if(k==="past") return "過去形";
+    return "過去分詞";
+  };
+
+  const correctLabels = correctKeys.map(labelOf);
+  const options = shuffle(["現在形","過去形","過去分詞","（その他）"]).slice(0,4);
+  // ensure all 3 labels are present and 4th is "（その他）"
+  const baseOpts = shuffle(["現在形","過去形","過去分詞"]);
+  const opts = shuffle([...baseOpts, "（その他）"]);
+
   return {
-    kind:"verbForm",
-    promptMain: `「${shown}」はどの形？`,
-    promptSub: `動詞（${w.forms.base}）の形当て（4択）`,
-    options,
-    correctIndex: options.indexOf(correctLabel),
-    correctAnswer: correctLabel,
-    meta: { en:w.forms.base, ja:w.ja, series:w.series, forms:w.forms, asked:key }
+    kind: "mc",
+    prompt: `「${shown}」はどの形？（${word.en}：${word.ja}）`,
+    options: opts,
+    correctSet: new Set(correctLabels.map(norm)),
+    meta: { word, mix: "form", shown, correctLabels }
   };
 }
 
-function makeSeriesJa2EnQuestion(level){
-  // choose a series with at least 8 words (avoid tiny series)
-  const map = state.byLevelSeries[level];
-  const seriesList = [...map.entries()].filter(([k,arr])=>arr.length>=8);
-  if(seriesList.length===0){
-    return makeMCQuestion(level, "ja2en");
-  }
-  const [seriesName, arr] = sample(seriesList);
-  const w = sample(arr);
-  const correct = w.en;
-
-  // distractors: from other series preferably
-  const all = state.byLevel[level];
-  const used = new Set([normalize(correct)]);
-  const wrongs = [];
-  let guard=0;
-  while(wrongs.length<3 && guard++<3000){
-    const cand = sample(all);
-    if(cand.series === seriesName) continue;
-    const v = normalize(cand.en);
-    if(!v || used.has(v)) continue;
-    used.add(v);
-    wrongs.push(cand.en);
-  }
-  // if not enough, fill from same level anywhere
-  while(wrongs.length<3 && guard++<5000){
-    const cand = sample(all);
-    const v = normalize(cand.en);
-    if(!v || used.has(v)) continue;
-    used.add(v);
-    wrongs.push(cand.en);
-  }
-
-  const options = shuffle([correct, ...wrongs]);
+function mixSeriesTypingQuestion(pool){
+  // Ask: 【series】 ja は英語で？
+  const word = pool[Math.floor(Math.random()*pool.length)];
+  const prompt = `【${word.series}】「${word.ja}」は英語で？`;
   return {
-    kind:"seriesJa2En",
-    promptMain: `【${seriesName}】「${w.ja}」は英語で？`,
-    promptSub: "系列（カテゴリ）つき（日→英 4択）",
-    options,
-    correctIndex: options.indexOf(correct),
-    correctAnswer: correct,
-    meta: { en:w.en, ja:w.ja, series:seriesName }
+    kind: "typing",
+    prompt,
+    correctSet: new Set([norm(word.en)]),
+    showMeaning: `（日→英 固定）`,
+    example: `例）${word.en}`,
+    meta: { word, mix: "series" }
   };
+}
+
+function makeQuizQuestions(config, useMissOnly=false){
+  const pool = buildQuestionPool(config, useMissOnly);
+  if(pool.length < 6){
+    // fallback: ignore level
+    const all = useMissOnly ? Object.values(state.miss||{}) : WORDS;
+    return makeQuizQuestions({ ...config, level: config.level }, useMissOnly); // still try
+  }
+
+  const qs = [];
+  if(config.quizType === "mc"){
+    const base = shuffle(pool).slice(0,10);
+    for(const w of base){
+      qs.push(choiceQuestion(w, config.direction, pool));
+    }
+  }else if(config.quizType === "typing"){
+    const base = shuffle(pool).slice(0,10);
+    for(const w of base){
+      qs.push(typingQuestion(w, config.direction));
+    }
+  }else{ // mix
+    // 5 form + 5 series
+    for(let i=0;i<5;i++){
+      qs.push(mixFormQuestion(pool));
+    }
+    for(let i=0;i<5;i++){
+      qs.push(mixSeriesTypingQuestion(pool));
+    }
+    return shuffle(qs);
+  }
+  return qs;
+}
+
+// ---- Quiz runtime ----
+let quiz = null; // { config, questions, idx, ok, missesThisRun: Set<key>, lock:bool, autoTimer:number|null }
+
+function setLock(v){
+  quiz.lock = v;
+  els.checkBtn.disabled = v;
+  els.nextBtn.disabled = v && quiz && quiz.idx < quiz.questions.length-1; // allow next after lock? we'll control separately
+}
+
+function showFeedback(ok, msg){
+  els.feedback.className = `feedback ${ok ? "ok" : "ng"}`;
+  els.feedback.textContent = msg;
+}
+
+function clearFeedback(){
+  els.feedback.className = "feedback";
+  els.feedback.textContent = "";
+}
+
+function updateProgress(){
+  els.progress.textContent = `${quiz.idx+1} / ${quiz.questions.length}`;
+}
+
+function renderQuestion(){
+  clearFeedback();
+  setLock(false);
+  els.nextBtn.disabled = true;
+
+  const q = quiz.questions[quiz.idx];
+  els.qText.textContent = q.prompt;
+  els.qTypePill.textContent =
+    (quiz.config.quizType === "mc") ? "4択" :
+    (quiz.config.quizType === "typing") ? "打ち込み" :
+    (q.meta.mix === "form") ? "形（4択）" : "系（日→英）";
+
+  updateProgress();
+
+  // reset UI
+  els.choices.innerHTML = "";
+  els.typing.classList.add("hidden");
+  els.choices.classList.add("hidden");
+  els.typeMeaning.textContent = "";
+  els.typeExample.textContent = "";
+  els.typeInput.value = "";
+
+  if(q.kind === "mc"){
+    els.choices.classList.remove("hidden");
+    q.options.forEach((opt)=>{
+      const btn = document.createElement("button");
+      btn.className = "choiceBtn";
+      btn.type = "button";
+      btn.textContent = opt;
+      btn.onclick = ()=> submitAnswer(opt);
+      els.choices.appendChild(btn);
+    });
+  }else{
+    els.typing.classList.remove("hidden");
+    els.typeMeaning.textContent = q.showMeaning || "";
+    els.typeExample.textContent = q.example || "";
+    // focus after render
+    setTimeout(()=>els.typeInput.focus(), 0);
+  }
+}
+
+function recordAnswer(ok, word){
+  state.totalAns += 1;
+  if(ok) state.totalOk += 1;
+
+  state.recent = (state.recent || []).concat([ok]).slice(-50);
+
+  if(!ok && word){
+    const k = keyOfWord(word);
+    if(!state.miss[k]){
+      state.miss[k] = { ...word, misses: 0 };
+    }
+    state.miss[k].misses = (state.miss[k].misses || 0) + 1;
+    quiz.missesThisRun.add(k);
+  }
+  saveState();
+  updateRankUI();
+}
+
+function submitAnswer(rawAnswer){
+  if(quiz.lock) return;
+  const q = quiz.questions[quiz.idx];
+
+  // Normalize and check
+  const ans = norm(rawAnswer);
+  const ok = q.correctSet.has(ans);
+
+  // Lock to prevent double scoring
+  quiz.lock = true;
+
+  // Mark choices
+  if(q.kind === "mc"){
+    [...els.choices.querySelectorAll("button")].forEach(btn=>{
+      btn.disabled = true;
+      const v = norm(btn.textContent);
+      if(q.correctSet.has(v)) btn.classList.add("isCorrect");
+      if(v === ans && !q.correctSet.has(v)) btn.classList.add("isWrong");
+    });
+  }else{
+    els.typeInput.disabled = true;
+    els.checkBtn.disabled = true;
+  }
+
+  // Feedback message
+  if(ok){
+    showFeedback(true, "正解！");
+  }else{
+    const corrects = [...q.correctSet].map(s=>s); // already norm
+    const pretty = (()=>{
+      // show original forms if possible
+      if(q.kind === "typing"){
+        // display one representative correct (first)
+        // try to show from word fields
+        const w = q.meta.word;
+        if(w){
+          const dir = q.meta.dir;
+          const askEnToJa = (dir === "en_to_ja");
+          return askEnToJa ? w.ja : w.en;
+        }
+      }
+      if(q.meta && q.meta.correctLabels) return q.meta.correctLabels.join(" / ");
+      return corrects[0] || "";
+    })();
+    showFeedback(false, `不正解… 正解：${pretty}`);
+  }
+
+  recordAnswer(ok, q.meta.word);
+
+  // Enable Next
+  els.nextBtn.disabled = false;
+
+  // Auto-advance
+  const delay = ok ? 650 : 950;
+  if(quiz.autoTimer) clearTimeout(quiz.autoTimer);
+  quiz.autoTimer = setTimeout(()=>{
+    if(!els.quiz.classList.contains("hidden")){
+      goNext();
+    }
+  }, delay);
 }
 
 function goNext(){
-  const s = state.session;
-  s.index += 1;
-  nextQuestion();
-}
+  if(quiz.autoTimer){ clearTimeout(quiz.autoTimer); quiz.autoTimer = null; }
+  const q = quiz.questions[quiz.idx];
+  // reset typing lock
+  els.typeInput.disabled = false;
+  els.checkBtn.disabled = false;
 
-function nextQuestion(){
-  const s = state.session;
-  clearInteraction();
-
-  // finish?
-  if(s.index >= s.total){
-    finishSession();
-    return;
-  }
-
-  setQuizMeta();
-
-  const task = s.plan[s.index];
-  let q;
-  if(task.kind==="mc") q = makeMCQuestion(s.level, s.dir);
-  else if(task.kind==="type") q = makeTypeQuestion(s.level, s.dir);
-  else if(task.kind==="verbForm") q = makeVerbFormQuestion(s.level);
-  else if(task.kind==="seriesJa2En") q = makeSeriesJa2EnQuestion(s.level);
-  else q = makeMCQuestion(s.level, s.dir);
-
-  s.current = q;
-
-  setPrompt(q.promptMain, q.promptSub);
-
-  if(q.kind==="mc" || q.kind==="verbForm" || q.kind==="seriesJa2En"){
-    renderChoices(q.options, q.correctIndex, (isCorrect, picked)=>{
-      onAnswered(isCorrect, q.correctAnswer, picked);
-    });
+  if(quiz.idx < quiz.questions.length-1){
+    quiz.idx += 1;
+    renderQuestion();
   }else{
-    // type
-    $("typeArea").classList.remove("hidden");
-    $("typeInput").focus();
+    finishQuiz();
   }
 }
 
-function onAnswered(isCorrect, correctAnswer, yourAnswer){
-  const s = state.session;
-  if(isCorrect) s.correct += 1;
-  setQuizMeta();
-  pushRolling(isCorrect);
+function finishQuiz(){
+  // Result screen
+  const ok = quiz.questions.length - quiz.missesThisRun.size; // rough (miss set counts words, not questions)
+  // better: count from this run by tracking ok count
+  const total = quiz.questions.length;
+  const recentRunOk = quiz.questions.reduce((acc, q, i)=>acc, 0);
 
-  // feedback
-  const q = s.current;
-  const right = q.correctAnswer;
-  if(isCorrect){
-    showFeedback(true, "正解！", `答え：${right}`);
-  }else{
-    showFeedback(false, "不正解", `答え：${right}`);
-  }
+  const misses = [...quiz.missesThisRun].map(k=>state.miss[k]).filter(Boolean);
+  const missWords = misses
+    .sort((a,b)=>(b.misses||0)-(a.misses||0))
+    .slice(0,50);
 
-  // store history
-  s.history.push({
-    kind: q.kind,
-    promptMain: q.promptMain,
-    promptSub: q.promptSub,
-    meta: q.meta,
-    correct: isCorrect,
-    correctAnswer: right,
-    // yourAnswer for mc is handled in click; for type in submit
-    yourAnswer: yourAnswer
-  });
+  // Build result text: compute run accuracy from state recent diff? We'll store run stats in quiz
+  const acc = Math.round((quiz.okCount / total)*100);
+  els.resultText.textContent = `正解：${quiz.okCount} / ${total}（${acc}%）`;
 
-  $("nextBtn").classList.remove("hidden");
-  // 自動で次へ（4択も自動遷移）
-  setTimeout(()=>{
-    // すでに画面が切り替わっている場合は何もしない
-    if(!$("quiz").classList.contains("hidden")){
-      goNext();
-    }
-  }, 800);
-}
-
-function finishSession(){
-  // rank update at end
-  const rankInfo = applyRankRule();
-
-  show("result");
-  const s = state.session;
-  $("resultScore").textContent = `${s.correct} / ${s.total}`;
-  $("resultAcc").textContent = `正答率 ${Math.round((s.correct/s.total)*100)}%`;
-
-  $("rankAfter").textContent = `ランク ${state.profile.rank}`;
-  $("rankNote").textContent = rankInfo.note;
-
-  // review list
-  const list = $("reviewList");
-  list.innerHTML = "";
-  for(const h of s.history){
+  // miss list
+  els.missList.innerHTML = "";
+  if(missWords.length === 0){
     const div = document.createElement("div");
-    div.className = "revItem";
-    const tag = h.correct ? "✅" : "❌";
-    const meta = h.meta || {};
-    let extra = "";
-    if(h.kind==="verbForm" && meta.forms){
-      extra = `（base: ${meta.forms.base}, past: ${meta.forms.past}, pp: ${meta.forms.pp}）`;
-    }else{
-      extra = `（${meta.en ?? ""} / ${meta.ja ?? ""} / ${meta.series ?? ""}）`;
-    }
-    div.innerHTML = `<b>${tag} ${escapeHtml(h.promptMain)}</b><div class="small">${escapeHtml("答え： " + h.correctAnswer + " " + extra)}</div>`;
-    list.appendChild(div);
+    div.className = "muted";
+    div.textContent = "ミスはありませんでした。";
+    els.missList.appendChild(div);
+  }else{
+    missWords.forEach(w=>{
+      const row = document.createElement("div");
+      row.className = "missItem";
+      row.innerHTML = `<div class="missEn">${escapeHtml(w.en)}</div><div class="missJa">${escapeHtml(w.ja)}</div><div class="missMeta">Lv${w.level} / ${escapeHtml(w.series)} / ミス${w.misses||1}</div>`;
+      els.missList.appendChild(row);
+    });
   }
+
+  screen("result");
 }
 
-function wire(){
-  $("startBtn").onclick = startSession;
-  $("quitBtn").onclick = ()=>{ show("home"); };
-  $("backHomeBtn").onclick = ()=>{ show("home"); };
-  $("retryBtn").onclick = ()=>{ startSession(); };
-  $("nextBtn").onclick = goNext;
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, (c)=>({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  })[c]);
+}
 
-  $("typeArea").addEventListener("submit", (ev)=>{
-    ev.preventDefault();
-    const s = state.session;
-    const q = s.current;
-    const inp = $("typeInput");
-    const your = inp.value.trim();
-    inp.disabled = true;
-
-    const correct = normalize(your) === normalize(q.correctAnswer);
-    if(correct) s.correct += 1;
-    setQuizMeta();
-    pushRolling(correct);
-
-    if(correct){
-      showFeedback(true, "正解！", `答え：${q.correctAnswer}`);
-    }else{
-      showFeedback(false, "不正解", `答え：${q.correctAnswer} ／ あなた：${your || "（未入力）"}`);
-    }
-
-    s.history.push({
-      kind: q.kind,
-      promptMain: q.promptMain,
-      promptSub: q.promptSub,
-      meta: q.meta,
-      correct,
-      correctAnswer: q.correctAnswer,
-      yourAnswer: your
-    });
-
-    $("nextBtn").classList.remove("hidden");
-  // 自動で次へ（4択も自動遷移）
-  setTimeout(()=>{
-    // すでに画面が切り替わっている場合は何もしない
-    if(!$("quiz").classList.contains("hidden")){
-      goNext();
-    }
-  }, 800);
-    // 自動遷移（連打加点を防ぐ）
-    setTimeout(()=>{
-      if(!$("quiz").classList.contains("hidden")){
-        goNext();
-      }
-    }, 800);
+// ---- Event wiring ----
+function buildLevelOptions(){
+  els.level.innerHTML = "";
+  const labels = [
+    { v: 1, t: "レベル1（基礎）" },
+    { v: 2, t: "レベル2（標準）" },
+    { v: 3, t: "レベル3（発展）" },
+  ];
+  labels.forEach(o=>{
+    const opt = document.createElement("option");
+    opt.value = String(o.v);
+    opt.textContent = o.t;
+    els.level.appendChild(opt);
   });
+}
 
-  $("resetBtn").onclick = ()=>{
-    if(confirm("学習履歴（ランク・正答率履歴）をリセットします。よろしいですか？")){
-      resetProfile();
-      alert("リセットしました");
-    }
+function applyLastConfigToUI(){
+  const c = state.lastConfig || { level: 1, quizType:"mc", direction:"en_to_ja" };
+  els.level.value = String(c.level ?? 1);
+  els.quizType.value = c.quizType ?? "mc";
+  els.direction.value = c.direction ?? "en_to_ja";
+  updateDirectionHint();
+}
+
+function readConfigFromUI(){
+  return {
+    level: Number(els.level.value)||1,
+    quizType: els.quizType.value,
+    direction: els.direction.value,
+  };
+}
+
+function updateDirectionHint(){
+  const qt = els.quizType.value;
+  const disabled = (qt === "mix");
+  els.direction.disabled = disabled;
+  els.directionHint.style.opacity = disabled ? "1" : "0.7";
+}
+
+function startQuiz({ useMissOnly=false } = {}){
+  const config = readConfigFromUI();
+  state.lastConfig = { ...config };
+  saveState();
+
+  const questions = makeQuizQuestions(config, useMissOnly);
+  quiz = {
+    config,
+    questions,
+    idx: 0,
+    okCount: 0,
+    missesThisRun: new Set(),
+    lock: false,
+    autoTimer: null,
   };
 
-  // rank change -> suggest level
-  refreshHeader();
+  // patch submitAnswer to count ok
+  const origSubmit = submitAnswer;
+  // We'll not monkeypatch; instead wrap by checking in submitAnswer itself:
+  // But easiest: compute okCount after evaluation here:
+  // We'll do by intercepting in submitAnswer: (implemented below) -> not possible now.
+  // We'll implement okCount update in a small hook by storing lastOk in quiz.
+  // (See below: we adjust in submitAnswer by comparing state totals? no.)
+  // We'll instead set a flag on q when answered.
+  quiz.questions.forEach(q=>{ q._answered = false; q._ok = false; });
+
+  // move
+  screen("quiz");
+  renderQuestion();
 }
 
-(async function main(){
-  try{
-    wire();
-    await loadWords();
-    show("home");
-  }catch(e){
-    console.error(e);
-    alert(String(e?.message || e));
+function attachSubmitCounting(){
+  // Wrap submitAnswer once
+  const orig = submitAnswer;
+  window.__submitWrapped = true;
+}
+
+els.saveUserBtn.onclick = ()=>{
+  state.userName = (els.userName.value||"").trim().slice(0,20);
+  saveState();
+  showFeedback(true, "保存しました");
+  setTimeout(()=>clearFeedback(), 800);
+};
+
+els.quizType.onchange = updateDirectionHint;
+
+els.startBtn.onclick = ()=> startQuiz({ useMissOnly:false });
+els.startBtn2.onclick = ()=> startQuiz({ useMissOnly:false });
+
+els.reviewBtn.onclick = ()=> startQuiz({ useMissOnly:true });
+
+els.backBtn.onclick = ()=>{
+  if(quiz && quiz.autoTimer){ clearTimeout(quiz.autoTimer); }
+  screen("setup");
+  clearFeedback();
+};
+
+els.backBtn2.onclick = ()=>{
+  screen("setup");
+};
+
+els.quitBtn.onclick = ()=>{
+  if(quiz && quiz.autoTimer){ clearTimeout(quiz.autoTimer); }
+  screen("result");
+};
+
+els.nextBtn.onclick = ()=> goNext();
+
+els.checkBtn.onclick = ()=>{
+  if(quiz.lock) return;
+  const v = els.typeInput.value;
+  submitAnswer(v);
+};
+
+// Enter key for typing
+els.typeInput.addEventListener("keydown", (e)=>{
+  if(e.key === "Enter"){
+    e.preventDefault();
+    if(!quiz.lock) submitAnswer(els.typeInput.value);
   }
-})();
+});
+
+els.retryMissBtn.onclick = ()=>{
+  // Start quiz using miss words only, keeping last config
+  applyLastConfigToUI();
+  startQuiz({ useMissOnly:true });
+};
+
+els.resetBtn.onclick = ()=>{
+  if(!confirm("保存データ（正答数・ミス・ランク）を初期化します。よろしいですか？")) return;
+  localStorage.removeItem(STORAGE_KEY);
+  state = defaultState();
+  applyLastConfigToUI();
+  els.userName.value = "";
+  updateRankUI();
+  showFeedback(true, "初期化しました");
+  setTimeout(()=>clearFeedback(), 900);
+};
+
+// ---- SubmitAnswer with run okCount ----
+// (We need okCount; implement by overriding submitAnswer reference above.)
+const _submitAnswerOriginal = submitAnswer;
+submitAnswer = function(rawAnswer){
+  if(quiz.lock) return;
+  const q = quiz.questions[quiz.idx];
+  const ans = norm(rawAnswer);
+  const ok = q.correctSet.has(ans);
+
+  // mark run stats once
+  if(!q._answered){
+    q._answered = true;
+    q._ok = ok;
+    if(ok) quiz.okCount += 1;
+  }
+
+  // proceed with original (but it will recompute ok; that's fine)
+  return _submitAnswerOriginal(rawAnswer);
+};
+
+// ---- init ----
+async function init(){
+  state = loadState();
+
+  buildLevelOptions();
+  applyLastConfigToUI();
+
+  els.userName.value = state.userName || "";
+
+  updateRankUI();
+  screen("setup");
+  updateDirectionHint();
+
+  try{
+    WORDS = await loadWords();
+  }catch(err){
+    alert(String(err && err.message ? err.message : err));
+  }
+}
+
+init();
