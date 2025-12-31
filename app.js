@@ -191,7 +191,7 @@ function renderChoices(options, correctIndex, onPick){
       if(i!==correctIndex){
         area.querySelectorAll("button")[correctIndex].classList.add("correct");
       }
-      onPick(i===correctIndex);
+      onPick(i===correctIndex, opt);
     };
     area.appendChild(btn);
   });
@@ -401,6 +401,12 @@ function makeSeriesJa2EnQuestion(level){
   };
 }
 
+function goNext(){
+  const s = state.session;
+  s.index += 1;
+  nextQuestion();
+}
+
 function nextQuestion(){
   const s = state.session;
   clearInteraction();
@@ -426,8 +432,8 @@ function nextQuestion(){
   setPrompt(q.promptMain, q.promptSub);
 
   if(q.kind==="mc" || q.kind==="verbForm" || q.kind==="seriesJa2En"){
-    renderChoices(q.options, q.correctIndex, (isCorrect)=>{
-      onAnswered(isCorrect, q.options[q.correctIndex], q.options.find((_,i)=>i===q.correctIndex), q.options);
+    renderChoices(q.options, q.correctIndex, (isCorrect, picked)=>{
+      onAnswered(isCorrect, q.correctAnswer, picked);
     });
   }else{
     // type
@@ -436,7 +442,7 @@ function nextQuestion(){
   }
 }
 
-function onAnswered(isCorrect, correctAnswer, _unused, options){
+function onAnswered(isCorrect, correctAnswer, yourAnswer){
   const s = state.session;
   if(isCorrect) s.correct += 1;
   setQuizMeta();
@@ -460,10 +466,17 @@ function onAnswered(isCorrect, correctAnswer, _unused, options){
     correct: isCorrect,
     correctAnswer: right,
     // yourAnswer for mc is handled in click; for type in submit
-    yourAnswer: null
+    yourAnswer: yourAnswer
   });
 
   $("nextBtn").classList.remove("hidden");
+  // 自動で次へ（4択も自動遷移）
+  setTimeout(()=>{
+    // すでに画面が切り替わっている場合は何もしない
+    if(!$("quiz").classList.contains("hidden")){
+      goNext();
+    }
+  }, 800);
 }
 
 function finishSession(){
@@ -502,10 +515,7 @@ function wire(){
   $("quitBtn").onclick = ()=>{ show("home"); };
   $("backHomeBtn").onclick = ()=>{ show("home"); };
   $("retryBtn").onclick = ()=>{ startSession(); };
-  $("nextBtn").onclick = ()=>{
-    state.session.index += 1;
-    nextQuestion();
-  };
+  $("nextBtn").onclick = goNext;
 
   $("typeArea").addEventListener("submit", (ev)=>{
     ev.preventDefault();
@@ -537,11 +547,18 @@ function wire(){
     });
 
     $("nextBtn").classList.remove("hidden");
+  // 自動で次へ（4択も自動遷移）
+  setTimeout(()=>{
+    // すでに画面が切り替わっている場合は何もしない
+    if(!$("quiz").classList.contains("hidden")){
+      goNext();
+    }
+  }, 800);
     // 自動遷移（連打加点を防ぐ）
     setTimeout(()=>{
-      if(!$("result").classList.contains("hidden")) return;
-      if($("nextBtn").classList.contains("hidden")) return;
-      $("nextBtn").click();
+      if(!$("quiz").classList.contains("hidden")){
+        goNext();
+      }
     }, 800);
   });
 
