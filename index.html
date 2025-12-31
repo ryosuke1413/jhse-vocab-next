@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Vocab Trainer Next</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">V</span>
+      <div class="brandText">
+        <div class="title">Vocab Trainer Next</div>
+        <div class="subtitle">GitHub Pages / オフライン完結</div>
+      </div>
+    </div>
+
+    <div class="status">
+      <div class="badge" id="rankBadge" title="正答率で昇降格します">
+        <span id="rankName">Loading…</span>
+        <span class="dot" id="rankDot"></span>
+      </div>
+      <div class="mini">
+        <span id="accText">—</span>
+        <span class="sep">|</span>
+        <span id="streakText">—</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <!-- HOME -->
+    <section class="card" id="viewHome">
+      <h1>学習モード</h1>
+
+      <div class="grid2">
+        <div class="panel">
+          <h2>4択10問</h2>
+          <div class="row">
+            <label>方向</label>
+            <select id="mcqDir">
+              <option value="ja2en">日本語 → 英語</option>
+              <option value="en2ja">英語 → 日本語</option>
+            </select>
+          </div>
+          <div class="row">
+            <label>難易度</label>
+            <select id="mcqLevel">
+              <option value="1">1（易）</option>
+              <option value="2">2（中）</option>
+              <option value="3">3（難）</option>
+            </select>
+          </div>
+          <button class="btn primary" id="startMcq">開始</button>
+        </div>
+
+        <div class="panel">
+          <h2>打ち込み10問</h2>
+          <div class="row">
+            <label>方向</label>
+            <select id="typeDir">
+              <option value="ja2en">日本語 → 英語</option>
+              <option value="en2ja">英語 → 日本語</option>
+            </select>
+          </div>
+          <div class="row">
+            <label>難易度</label>
+            <select id="typeLevel">
+              <option value="1">1（易）</option>
+              <option value="2">2（中）</option>
+              <option value="3">3（難）</option>
+            </select>
+          </div>
+          <button class="btn primary" id="startTyping">開始</button>
+        </div>
+
+        <div class="panel full">
+          <h2>ミックス10問</h2>
+          <p class="muted">
+            形クイズ（現在形/過去形/過去分詞）5問＋「○○系（日→英）」5問
+          </p>
+          <button class="btn primary" id="startMix">開始</button>
+        </div>
+      </div>
+
+      <hr class="hr" />
+
+      <div class="grid2">
+        <div class="panel">
+          <h3>データ</h3>
+          <p class="muted">words.json を読み込みます（同ディレクトリ）。</p>
+          <button class="btn" id="reloadWords">再読み込み</button>
+          <div class="small" id="wordsMeta">—</div>
+        </div>
+
+        <div class="panel">
+          <h3>成績</h3>
+          <div class="stats">
+            <div class="stat">
+              <div class="k">累積回答</div>
+              <div class="v" id="totalAns">—</div>
+            </div>
+            <div class="stat">
+              <div class="k">累積正答率</div>
+              <div class="v" id="lifeAcc">—</div>
+            </div>
+            <div class="stat">
+              <div class="k">直近正答率（50問）</div>
+              <div class="v" id="rollAcc">—</div>
+            </div>
+            <div class="stat">
+              <div class="k">ランクポイント</div>
+              <div class="v" id="rp">—</div>
+            </div>
+          </div>
+
+          <div class="row2">
+            <button class="btn danger" id="resetStats">成績リセット</button>
+            <button class="btn" id="exportStats">成績エクスポート</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- QUIZ -->
+    <section class="card hidden" id="viewQuiz">
+      <div class="quizTop">
+        <div>
+          <div class="mode" id="modeLabel">—</div>
+          <div class="qno" id="qnoLabel">—</div>
+        </div>
+        <button class="btn" id="backHome">ホームへ</button>
+      </div>
+
+      <div class="prompt" id="promptText">—</div>
+
+      <!-- MCQ -->
+      <div id="mcqArea" class="hidden">
+        <div class="choices" id="choiceList"></div>
+      </div>
+
+      <!-- Typing -->
+      <div id="typingArea" class="hidden">
+        <div class="row">
+          <label for="typingInput">回答</label>
+          <input
+            id="typingInput"
+            type="text"
+            placeholder="ここに入力"
+            autocomplete="off"
+            autocapitalize="none"
+            spellcheck="false"
+            inputmode="latin"
+          />
+        </div>
+        <button class="btn primary" id="submitTyping">提出</button>
+      </div>
+
+      <div class="feedback" id="feedbackBox"></div>
+      <div class="progress">
+        <div class="bar" id="progressBar"></div>
+      </div>
+    </section>
+
+    <!-- RESULT -->
+    <section class="card hidden" id="viewResult">
+      <h2>結果</h2>
+      <div class="resultGrid">
+        <div class="big" id="resultScore">—</div>
+        <div class="small muted" id="resultDetail">—</div>
+      </div>
+
+      <div class="panel">
+        <h3>ランク判定</h3>
+        <div class="small" id="rankExplain">—</div>
+      </div>
+
+      <div class="row2">
+        <button class="btn primary" id="goHome">ホームへ</button>
+        <button class="btn" id="retrySame">同条件で再挑戦</button>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <span class="muted">© Vocab Trainer Next</span>
+    </footer>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>
